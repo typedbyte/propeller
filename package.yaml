@@ -1,0 +1,22 @@
+name:           propeller
+version:        0.1.0.0
+github:         "typedbyte/propeller"
+license:        BSD3
+author:         "Michael Szvetits"
+maintainer:     "typedbyte@qualified.name"
+copyright:      "2020 Michael Szvetits"
+synopsis:       A Simple Propagator Library
+category:       Data
+description:    Please see the README on GitHub at <https://github.com/typedbyte/propeller#readme>
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+
+ghc-options: -Wall
