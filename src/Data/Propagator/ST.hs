@@ -1,39 +1,52 @@
 -----------------------------------------------------------------------------
 -- |
--- Module      :  Data.Propagator.Cell
--- Copyright   :  (c) Michael Szvetits, 2020
+-- Module      :  Data.Propagator.ST
+-- Copyright   :  (c) Michael Szvetits, 2024
 -- License     :  BSD3 (see the file LICENSE)
 -- Maintainer  :  typedbyte@qualified.name
 -- Stability   :  stable
 -- Portability :  portable
 --
--- This module exports the types and functions needed to create cells,
+-- This module exports ST-based types and functions needed to create cells,
 -- manipulate their data and wire them up for data propagation.
 -----------------------------------------------------------------------------
-module Data.Propagator.Cell
-  ( 
-  -- * Cell Creation and Inspection
-    Cell
+module Data.Propagator.ST
+  ( -- * Networks
+    Propagation
+  , undo
+  , succeeded
+    -- ** Cells
+  , Cell
+  , Change(..)
   , cell
   , readCell
   , writeCell
-  -- * Cell Connection
+  , label
+    -- ** Connections
   , connect
   , sync
   , syncWith
-  -- * Value Propagation
-  , Propagation
-  , undo
-  , succeeded
   , propagate
   , propagateMany
-  , label
+    -- *** Numeric
+  , plus
+  , minus
+  , times
+  , timesWith
+  , abs
+  , absWith
+  , negate
+  , signum
+  , signumWith
   ) where
 
 -- base
-import Control.Monad (forM)
+import Control.Monad    (forM)
 import Control.Monad.ST (ST)
-import Data.STRef (STRef, modifySTRef, newSTRef, readSTRef, writeSTRef)
+import Data.STRef       (STRef, modifySTRef, newSTRef, readSTRef, writeSTRef)
+
+import Prelude hiding (abs, negate, signum)
+import Prelude qualified as Prelude
 
 import Data.Propagator.Change (Change(..))
 
@@ -90,7 +103,7 @@ writeCell :: a -> Cell s a -> ST s (Propagation s)
 writeCell new (Cell f vRef pRef) = do
   old <- readSTRef vRef
   case f old new of
-    Unchanged    -> pure success
+    Unchanged _  -> pure success
     Incompatible -> pure failure
     Changed n    -> do
       writeSTRef vRef n
@@ -205,3 +218,93 @@ label elems reify cells = solve [] (reverse cells)
           undo propagation
           pure vSolutions
       pure (concat solutions)
+
+-- | @plus a b c@ connects three cells using the following propagation schema:
+--
+-- * @a + b@ is propagated to @c@ if @a@ or @b@ changes.
+-- * @c - b@ is propagated to @a@ if @b@ or @c@ changes.
+-- * @c - a@ is propagated to @b@ if @a@ or @c@ changes.
+plus :: Num a => Cell s a -> Cell s a -> Cell s a -> ST s ()
+plus left right result = do
+  connect left result  (\lv -> (lv +)      <$> readCell right)
+  connect left right   (\lv -> subtract lv <$> readCell result)
+  connect right result (\rv -> (+ rv)      <$> readCell left)
+  connect right left   (\rv -> subtract rv <$> readCell result)
+  connect result left  (\sv -> (sv -)      <$> readCell right)
+  connect result right (\sv -> (sv -)      <$> readCell left)
+
+-- | @minus a b c@ connects three cells using the following propagation schema:
+--
+-- * @a - b@ is propagated to @c@ if @a@ or @b@ changes.
+-- * @b + c@ is propagated to @a@ if @b@ or @c@ changes.
+-- * @a - c@ is propagated to @b@ if @a@ or @c@ changes.
+minus :: Num a => Cell s a -> Cell s a -> Cell s a -> ST s ()
+minus left right result = do
+  connect left result  (\lv -> (lv -)      <$> readCell right)
+  connect left right   (\lv -> (lv -)      <$> readCell result)
+  connect right result (\rv -> subtract rv <$> readCell left)
+  connect right left   (\rv -> (+ rv)      <$> readCell result)
+  connect result left  (\dv -> (+ dv)      <$> readCell right)
+  connect result right (\dv -> subtract dv <$> readCell left)
+
+-- | @times a b c@ connects three cells using the following propagation schema:
+--
+-- * @a * b@ is propagated to @c@ if @a@ or @b@ changes.
+times :: Num a => Cell s a -> Cell s a -> Cell s a -> ST s ()
+times left right result = do
+  connect left result  (\lv -> (lv *) <$> readCell right)
+  connect right result (\rv -> (* rv) <$> readCell left)
+
+-- | @timesWith divOp a b c@ connects three cells using the following propagation schema:
+--
+-- * @a * b@ is propagated to @c@ if @a@ or @b@ changes.
+-- * @divOp c b@ is propagated to @a@ if @b@ or @c@ changes.
+-- * @divOp c a@ is propagated to @b@ if @a@ or @c@ changes.
+timesWith :: Num a => (a -> a -> a) -> Cell s a -> Cell s a -> Cell s a -> ST s ()
+timesWith divOp left right result = do
+  times left right result
+  connect left right   (\lv -> (`divOp` lv) <$> readCell result)
+  connect right left   (\rv -> (`divOp` rv) <$> readCell result)
+  connect result left  (\pv -> (pv `divOp`) <$> readCell right)
+  connect result right (\pv -> (pv `divOp`) <$> readCell left)
+
+-- | @abs a b@ connects two cells using the following propagation schema:
+--
+-- * @|a|@ is propagated to @b@ if @a@ changes.
+abs :: Num a => Cell s a -> Cell s a -> ST s ()
+abs c result =
+  connect c result (pure . Prelude.abs)
+
+-- | @absWith inv a b@ connects two cells using the following propagation schema:
+--
+-- * @|a|@ is propagated to @b@ if @a@ changes.
+-- * @inv b@ is propagated to @a@ if @b@ changes.
+absWith :: Num a => (a -> a) -> Cell s a -> Cell s a -> ST s ()
+absWith inv c result = do
+  connect c result (pure . Prelude.abs)
+  connect result c (pure . inv)
+
+-- | @negate a b@ connects two cells using the following propagation schema:
+--
+-- * @-a@ is propagated to @b@ if @a@ changes.
+-- * @-b@ is propagated to @a@ if @b@ changes.
+negate :: Num a => Cell s a -> Cell s a -> ST s ()
+negate c result = do
+  connect c result (pure . Prelude.negate)
+  connect result c (pure . Prelude.negate)
+
+-- | @signum a b@ connects two cells using the following propagation schema:
+--
+-- * @Prelude.signum a@ is propagated to @b@ if @a@ changes.
+signum :: Num a => Cell s a -> Cell s a -> ST s ()
+signum c result =
+  connect c result (pure . Prelude.signum)
+
+-- | @signumWith inv a b@ connects two cells using the following propagation schema:
+--
+-- * @Prelude.signum a@ is propagated to @b@ if @a@ changes.
+-- * @inv b@ is propagated to @a@ if @b@ changes.
+signumWith :: Num a => (a -> a) -> Cell s a -> Cell s a -> ST s ()
+signumWith inv c result = do
+  connect c result (pure . Prelude.signum)
+  connect result c (pure . inv)
