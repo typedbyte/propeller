@@ -18,7 +18,7 @@ module Data.Propagator
   , Propagator
   , runPropagator
     -- ** Cells
-  , CellKey
+  , CellKey(..)
   , Change(..)
   , cell
   , readCell
@@ -26,7 +26,7 @@ module Data.Propagator
   , removeCell
   , label
     -- ** Connections
-  , ConnectKey
+  , ConnectKey(..)
   , ConnectState(..)
   , connect
   , connect_
@@ -78,17 +78,25 @@ data Cell a = Cell
   }
 
 -- | Represents a unique identification of a network cell.
-newtype CellKey = CellKey { unCellKey :: Int }
+--
+-- Such an identification should not be constructed manually, or else
+-- 'InvalidCell' errors are possible. The raw identification is exposed for
+-- situations where cells should be managed externally, like in an 'M.IntMap'.
+newtype CellKey = CellKey { rawCellKey :: Int }
   deriving (Eq, Ord, Show)
 
 data Prop a = Prop
   { sources :: ![CellKey]
   , targets :: ![CellKey]
-  , action :: !(ConnectKey -> S.IntSet -> Propagator a ())
+  , action :: !(ConnectKey -> Propagator a ())
   }
 
 -- | Represents a unique identification of a network connection.
-newtype ConnectKey = ConnectKey { unConnectKey :: Int }
+--
+-- Such an identification should not be constructed manually, or else
+-- 'InvalidConnect' errors are possible. The raw identification is exposed for
+-- situations where connections should be managed externally, like in an 'M.IntMap'.
+newtype ConnectKey = ConnectKey { rawConnectKey :: Int }
   deriving (Eq, Ord, Show)
 
 -- | A network consists of cells and connections which propagate data between them.
@@ -203,7 +211,7 @@ cell initValue f =
   Propagator $ \net ->
     let
       nextKey = nextCellKey net
-      nextInt = unCellKey nextKey
+      nextInt = rawCellKey nextKey
       newCell = Cell initValue f S.empty S.empty
       net' =
         net
@@ -219,9 +227,27 @@ readCell k = value <$> getCell k
 
 -- | Writes a new value to a specific cell and starts to propagate potential
 -- changes through the network of connected cells.
-writeCell :: CellKey -> a -> Propagator a ()
-writeCell k newValue =
-  void $ push S.empty newValue k
+writeCell :: a -> CellKey -> Propagator a ()
+writeCell newValue ck@(CellKey k) =
+  Propagator $ \net -> do
+    (subs, newCells) <- getCompose $ M.alterF change k (cells net)
+    flip runPropagator net { cells = newCells } $
+      traverse_
+        (fire . ConnectKey)
+        (S.elems subs)
+  where
+    change maybeCell =
+      Compose $
+        case maybeCell of
+          Nothing -> Left (InvalidCell ck)
+          Just c@(Cell {value}) ->
+            case update c value newValue of
+              Changed new ->
+                Right (subscribers c, Just c { value = new })
+              Unchanged _ -> 
+                Right (S.empty, Just c)
+              Incompatible ->
+                Left (Conflict ck value newValue)
 
 -- | Removes a cell from the network. This also removes all connections related to the cell.
 removeCell :: CellKey -> Propagator a ()
@@ -250,7 +276,7 @@ label elems reify keys = solve [] (reverse keys)
         (net',a) <- runPropagator (readCell k) net
         solutions <-
           forM (elems a) $ \b ->
-            case runPropagator (writeCell k (reify b)) net' of
+            case runPropagator (writeCell (reify b) k) net' of
               Right (net'',()) ->
                 snd <$> runPropagator (solve (b:current) ks) net''
               Left _ ->
@@ -263,7 +289,7 @@ propagator state prop = do
   traverse_ (modifyCell $ addSub k) (sources prop)
   traverse_ (modifyCell $ addInc k) (targets prop)
   case state of
-    Live -> fire S.empty key >> pure key
+    Live -> fire key >> pure key
     Idle -> pure key
   where
     addSub k c = c { subscribers = S.insert k (subscribers c) }
@@ -275,10 +301,10 @@ propagator state prop = do
 connect :: ConnectState -> CellKey -> CellKey -> (a -> Maybe a) -> Propagator a ConnectKey
 connect state source target f =
   propagator state $ Prop [source] [target] $
-    \key ws -> do
+    \key -> do
       ins <- readCell source
       out <- toPropagator (NoPropagation key) (f ins)
-      push ws out target
+      writeCell out target
 
 -- | Same as 'connect', but discards the returned 'ConnectKey'.
 connect_ :: ConnectState -> CellKey -> CellKey -> (a -> Maybe a) -> Propagator a ()
@@ -328,11 +354,11 @@ syncWith_ f g state c1 c2 =
 combine :: ConnectState -> CellKey -> CellKey -> CellKey -> (a -> a -> Maybe a) -> Propagator a ConnectKey
 combine state source1 source2 target f =
   propagator state $ Prop [source1,source2] [target] $
-    \key ws -> do
+    \key -> do
       in1 <- readCell source1
       in2 <- readCell source2
       out <- toPropagator (NoPropagation key) (f in1 in2)
-      push ws out target
+      writeCell out target
 
 -- | Same as 'combine', but discards the returned 'ConnectKey'.
 combine_ :: ConnectState -> CellKey -> CellKey -> CellKey -> (a -> a -> Maybe a) -> Propagator a ()
@@ -345,10 +371,10 @@ combine_ state source1 source2 target f =
 combineMany :: ConnectState -> [CellKey] -> CellKey -> ([a] -> Maybe a) -> Propagator a ConnectKey
 combineMany state sources target f =
   propagator state $ Prop sources [target] $
-    \key ws -> do
+    \key -> do
       ins <- traverse readCell sources
       out <- toPropagator (NoPropagation key) (f ins)
-      push ws out target
+      writeCell out target
 
 -- | Same as 'combineMany', but discards the returned 'ConnectKey'.
 combineMany_ :: ConnectState -> [CellKey] -> CellKey -> ([a] -> Maybe a) -> Propagator a ()
@@ -361,10 +387,10 @@ combineMany_ state sources target f =
 distribute :: ConnectState -> CellKey -> [CellKey] -> (a -> Maybe a) -> Propagator a ConnectKey
 distribute state source targets f =
   propagator state $ Prop [source] targets $
-    \key ws -> do
+    \key -> do
       ins <- readCell source
       out <- toPropagator (NoPropagation key) (f ins)
-      traverse_ (push ws out) targets
+      traverse_ (writeCell out) targets
 
 -- | Same as 'distribute', but discards the returned 'ConnectKey'.
 distribute_ :: ConnectState -> CellKey -> [CellKey] -> (a -> Maybe a) -> Propagator a ()
@@ -377,10 +403,10 @@ distribute_ state source targets f =
 manyToMany :: ConnectState -> [CellKey] -> [CellKey] -> ([a] -> Maybe a) -> Propagator a ConnectKey
 manyToMany state sources targets f =
   propagator state $ Prop sources targets $
-    \key ws -> do
+    \key -> do
       ins <- traverse readCell sources
       out <- toPropagator (NoPropagation key) (f ins)
-      traverse_ (push ws out) targets
+      traverse_ (writeCell out) targets
 
 -- | Same as 'manyToMany', but discards the returned 'ConnectKey'.
 manyToMany_ :: ConnectState -> [CellKey] -> [CellKey] -> ([a] -> Maybe a) -> Propagator a ()
@@ -399,35 +425,10 @@ disconnect key@(ConnectKey k) = do
       removeInc c =
         c { incomings = S.delete k (incomings c) }
 
-fire :: S.IntSet -> ConnectKey -> Propagator a ()
-fire writes k = do
+fire :: ConnectKey -> Propagator a ()
+fire k = do
   prop <- getPropagator k
-  action prop k writes
-
-push :: S.IntSet -> a -> CellKey -> Propagator a ()
-push writes newValue ck@(CellKey k) =
-  Propagator $ \net -> do
-    (subs, newCells) <- getCompose $ M.alterF change k (cells net)
-    flip runPropagator net { cells = newCells } $
-      traverse_
-        (fire (S.insert k writes) . ConnectKey)
-        (S.elems subs)
-  where
-    change maybeCell =
-      Compose $
-        case maybeCell of
-          Nothing -> Left (InvalidCell ck)
-          Just c@(Cell {value}) ->
-            case update c value newValue of
-              Changed new ->
-                if S.member k writes then
-                  Left (Cycle ck)
-                else
-                  Right (subscribers c, Just c { value = new })
-              Unchanged _ -> 
-                Right (S.empty, Just c)
-              Incompatible ->
-                Left (Conflict ck value newValue)
+  action prop k
 
 -- | Represents possible errors that may occur when modifying or using a network.
 data Error a
@@ -436,11 +437,9 @@ data Error a
   | InvalidConnect ConnectKey
   -- ^ The specified connection could not be found.
   | NoPropagation ConnectKey
-  -- ^ The specified did not produce a value.
+  -- ^ The specified connection did not produce a value.
   | Conflict CellKey a a
   -- ^ The old value of the specified cell is incompatible with a new value propagated to it.
-  | Cycle CellKey
-  -- ^ The specified cell propagated a value to itself (directly or indirectly), leading to a cycle.
   deriving (Eq, Ord, Show)
 
 toError :: Error b -> Maybe a -> Either (Error b) a

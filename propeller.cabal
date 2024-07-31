@@ -1,6 +1,6 @@
 cabal-version:  3.0
 name:           propeller
-version:        0.2.0.0
+version:        0.3.0.0
 synopsis:       A Propagator Library
 description:    Please see the README on GitHub at <https://github.com/typedbyte/propeller#readme>
 category:       Data

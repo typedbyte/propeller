@@ -1,4 +1,5 @@
-module Main where
+{-# LANGUAGE LambdaCase #-}
+module Main (main) where
 
 import Control.Monad        (guard)
 import Data.Foldable        (foldrM, traverse_)
@@ -14,13 +15,22 @@ data Term c f v
   deriving (Eq, Ord, Show)
 
 merge :: (Eq c, Eq f, Ord v) => Term c f v -> Term c f v -> Change (Term c f v)
-merge t@(Constant c)    (Constant x) | c == x = Unchanged t
-merge t@(Variable v)    (Variable x) | v <= x = Unchanged t
-merge   (Variable _)    t                     = Changed t
-merge   t               (Variable _)          = Unchanged t
+merge t@(Constant c)    (Constant x) | c == x     = Unchanged t
+merge t@(Variable v)    (Variable x) | v <= x     = Unchanged t
+merge   (Variable v)    t            | occurs v t = Incompatible
+                                     | otherwise  = Changed t
+merge   t               (Variable _)              = Unchanged t
 merge   (Function f ts) (Function x xs)
-        | f == x && length ts == length xs    = Function f <$> sequence (zipWith merge ts xs)
-merge _                 _                     = Incompatible
+        | f == x && length ts == length xs        = Function f <$> sequence (zipWith merge ts xs)
+merge _                 _                         = Incompatible
+
+occurs :: Eq v => v -> Term c f v -> Bool
+occurs v = go
+  where
+    go = \case
+      Constant _    -> False
+      Variable x    -> x == v 
+      Function _ ts -> any go ts
 
 project :: Eq f => f -> Int -> Term c f v -> Maybe (Term c f v)
 project f i term = do
@@ -123,9 +133,15 @@ unify eqs =
 
 program :: [Unification]
 program =
-  [ Unification (Function "f" [int 1, var "Y"]) (var "X")
-  , Unification (var "Z") (Function "g" [name "a", name "b"])
-  , Unification (var "Y") (var "Z")
+  [ Unification
+      (Function "f" [int 1, var "Y"]) (var "X")
+  , Unification
+      (var "Z") (Function "g" [name "a", name "b"])
+  , Unification
+      (var "Y") (var "Z")
+  , Unification
+      (Function "f" [Function "g" [var "A", var "A"], var "U"])
+      (Function "f" [var "B", var "B"])
   ]
 
 main :: IO ()
