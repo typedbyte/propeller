@@ -202,7 +202,7 @@ label :: (a -> [b]) -- ^ A function which extracts testable values from a cell
                     --   value which can be written back to the cell.
       -> [Cell s a] -- ^ The set of cells for which the values are enumerated.
       -> ST s [[b]] -- ^ Returns all valid assignments for the given cells.
-label elems reify cells = solve [] (reverse cells)
+label elems reify = solve [] . reverse
   where
     solve current []     = pure [current]
     solve current (c:cs) = do

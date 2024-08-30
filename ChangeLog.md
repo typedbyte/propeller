@@ -12,3 +12,8 @@
 
 - Removed cycle detection because of performance and flexibility.
 - Exposed some internals for better usability in certain situations.
+
+## 0.4.0.0 (2024-08-31)
+
+- Added a propagator implementation with cells of heterogeneous types.
+- Allowed an initial cell value to depend on its cell key.
